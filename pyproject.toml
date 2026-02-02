@@ -1,5 +1,5 @@
 [project]
-name = "amplifier-app-cli"
+name = "amplifier-tui"
 version = "0.1.0"
 description = "Reference CLI implementation for Amplifier AI development platform"
 license = "MIT"
@@ -15,10 +15,11 @@ dependencies = [
     "pyyaml>=6.0.3",
     "prompt-toolkit>=3.0.52",
     "httpx[socks]>=0.28.1",
+    "textual>=1.0.0",
 ]
 
 [project.scripts]
-amplifier = "amplifier_app_cli.main:main"
+amplifiertui = "amplifier_app_cli.main:main"
 
 [tool.uv]
 package = true

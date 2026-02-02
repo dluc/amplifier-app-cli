@@ -210,8 +210,8 @@ def _display_session_history(
     console.print(Panel.fit(banner_text, border_style="cyan"))
     console.print()
 
-    # Filter to user/assistant messages only
-    display_messages = [m for m in transcript if m.get("role") in ("user", "assistant")]
+    # Filter to include user/assistant and tool messages
+    display_messages = [m for m in transcript if m.get("role") in ("user", "assistant", "tool_call", "tool_result")]
 
     # Handle message limiting
     skipped_count = 0
@@ -822,7 +822,7 @@ def register_session_commands(
             # Load transcript to count turns
             transcript_path = session_dir / "transcript.jsonl"
             if not transcript_path.exists():
-                console.print(f"[red]Error:[/red] No transcript found for session")
+                console.print("[red]Error:[/red] No transcript found for session")
                 sys.exit(1)
 
             messages = []
@@ -892,7 +892,7 @@ def register_session_commands(
         try:
             preview = get_fork_preview(session_dir, turn)
             console.print()
-            console.print(f"[bold]Fork Preview:[/bold]")
+            console.print("[bold]Fork Preview:[/bold]")
             console.print(f"  Parent: {preview['parent_id'][:8]}...")
             console.print(f"  Fork at turn: {turn} of {preview['max_turns']}")
             console.print(f"  Messages to copy: {preview['message_count']}")
@@ -1007,6 +1007,11 @@ def register_session_commands(
     @click.option(
         "--show-thinking", is_flag=True, help="Show thinking blocks in history"
     )
+    @click.option(
+        "--tui/--no-tui",
+        default=True,
+        help="Launch full-screen TUI interface (default: enabled)",
+    )
     def sessions_resume(
         session_id: str,
         force_bundle: str | None,
@@ -1015,6 +1020,7 @@ def register_session_commands(
         replay: bool,
         replay_speed: float,
         show_thinking: bool,
+        tui: bool,
     ):
         """Resume a stored interactive session."""
         store = SessionStore()
@@ -1052,7 +1058,35 @@ def register_session_commands(
             if bundle_name and not force_bundle:
                 console.print(f"  Using saved bundle: {bundle_name}")
 
-            # Display history or replay before entering interactive mode
+            # Launch TUI if requested
+            if tui:
+                from ..tui import AmplifierTUI
+
+                model_name = "unknown"
+                if config_data.get("providers"):
+                    provider = config_data["providers"][0]
+                    # Try different config locations for model name
+                    if isinstance(provider, dict):
+                        model_name = (
+                            provider.get("config", {}).get("model")
+                            or provider.get("model")
+                            or provider.get("config", {}).get("model_name")
+                            or provider.get("module", "").replace("provider-", "")
+                            or "unknown"
+                        )
+                app = AmplifierTUI(
+                    session=None,
+                    config_data=config_data,
+                    prepared_bundle=prepared_bundle,
+                    bundle_name=active_bundle,
+                    model_name=model_name,
+                    session_id=session_id,
+                    initial_transcript=transcript,
+                )
+                app.run()
+                return
+
+            # Display history or replay before entering interactive mode (CLI mode only)
             if not no_history:
                 if replay:
                     asyncio.run(
@@ -1118,9 +1152,18 @@ def register_session_commands(
         help="[Experimental] Force a different bundle for this session. "
         "May cause instability if the bundle differs significantly from the original.",
     )
+    @click.option(
+        "--tui/--no-tui",
+        default=True,
+        help="Launch full-screen TUI interface (default: enabled)",
+    )
     @click.pass_context
     def interactive_resume(
-        ctx: click.Context, session_id: str | None, limit: int, force_bundle: str | None
+        ctx: click.Context,
+        session_id: str | None,
+        limit: int,
+        force_bundle: str | None,
+        tui: bool,
     ):
         """Interactively select and resume a session.
 
@@ -1153,10 +1196,13 @@ def register_session_commands(
                 replay=False,
                 replay_speed=2.0,
                 show_thinking=False,
+                tui=tui,
             )
             return
 
-        _interactive_resume_impl(ctx, limit, sessions_resume, force_bundle=force_bundle)
+        _interactive_resume_impl(
+            ctx, limit, sessions_resume, force_bundle=force_bundle, tui=tui
+        )
 
 
 def _format_time_ago(dt: datetime) -> str:
@@ -1248,6 +1294,7 @@ def _interactive_resume_impl(
     sessions_resume_cmd: click.Command,
     *,
     force_bundle: str | None = None,
+    tui: bool = True,
 ) -> None:
     """Implementation of interactive resume with paging.
 
@@ -1256,6 +1303,7 @@ def _interactive_resume_impl(
         limit: Number of sessions per page
         sessions_resume_cmd: The sessions_resume command to invoke
         force_bundle: Optional bundle to force for the resumed session
+        tui: Whether to launch TUI interface (default: True)
     """
     store = SessionStore()
     # list_sessions() defaults to top_level_only=True, filtering out spawned sub-sessions
@@ -1268,7 +1316,7 @@ def _interactive_resume_impl(
 
     # If only one session, auto-select it
     if len(all_session_ids) == 1:
-        console.print(f"[dim]Only one session found, resuming...[/dim]")
+        console.print("[dim]Only one session found, resuming...[/dim]")
         ctx.invoke(
             sessions_resume_cmd,
             session_id=all_session_ids[0],
@@ -1278,6 +1326,7 @@ def _interactive_resume_impl(
             replay=False,
             replay_speed=2.0,
             show_thinking=False,
+            tui=tui,
         )
         return
 
@@ -1387,6 +1436,7 @@ def _interactive_resume_impl(
                     replay=False,
                     replay_speed=2.0,
                     show_thinking=False,
+                    tui=tui,
                 )
                 return
             else:

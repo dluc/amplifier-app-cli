@@ -65,6 +65,11 @@ def register_run_command(
         default="text",
         help="Output format: text (markdown), json (response only), json-trace (full execution detail)",
     )
+    @click.option(
+        "--tui/--no-tui",
+        default=True,
+        help="Launch full-screen TUI interface (default: enabled)",
+    )
     def run(
         prompt: str | None,
         bundle: str | None,
@@ -75,6 +80,7 @@ def register_run_command(
         resume: str | None,
         verbose: bool,
         output_format: str,
+        tui: bool,
     ):
         """Execute a prompt or start an interactive session."""
         from ..session_store import SessionStore
@@ -306,9 +312,21 @@ def register_run_command(
                     prepared_bundle.mount_plan["providers"] = updated_providers
 
         # Run update check (uses unified startup_checker with settings.yaml)
+        # Use timeout to prevent network hangs from blocking TUI startup
         from ..utils.startup_checker import check_and_notify
 
-        asyncio.run(check_and_notify())
+        try:
+            asyncio.run(asyncio.wait_for(check_and_notify(), timeout=3.0))
+        except asyncio.TimeoutError:
+            # Update check took too long - proceed without it but inform user
+            if tui:
+                # TUI will show banner after launch; add brief note
+                pass  # Silent skip for TUI (update check happens in background later if needed)
+            else:
+                # For non-TUI modes, show a warning about skipped update check
+                console.print(
+                    "[yellow]⚠ Update check timed out (network slow). Skipping.[/yellow]"
+                )
 
         if mode == "chat":
             # Interactive mode - supports optional initial_prompt for auto-execution
@@ -318,6 +336,33 @@ def register_run_command(
                 initial_prompt = sys.stdin.read()
                 if initial_prompt is not None and not initial_prompt.strip():
                     initial_prompt = None
+
+            # TUI mode - launch full-screen interface
+            if tui:
+                from ..tui import AmplifierTUI
+
+                session_id = resume or str(uuid.uuid4())
+                model_name = "unknown"
+                if config_data.get("providers"):
+                    provider = config_data["providers"][0]
+                    # Try different config locations for model name
+                    if isinstance(provider, dict):
+                        model_name = (
+                            provider.get("config", {}).get("model")
+                            or provider.get("model")
+                            or provider.get("config", {}).get("model_name")
+                            or provider.get("module", "").replace("provider-", "")
+                            or "unknown"
+                        )
+                app = AmplifierTUI(
+                    config_data=config_data,
+                    prepared_bundle=prepared_bundle,
+                    bundle_name=config_source_name,
+                    model_name=model_name,
+                    session_id=session_id,
+                )
+                app.run()
+                return
 
             if resume:
                 # Resume existing session (transcript loaded earlier)

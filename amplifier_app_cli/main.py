@@ -1151,6 +1151,7 @@ def cli(ctx, install_completion):
             mode="chat",
             resume=None,
             verbose=False,
+            tui=True,  # TUI mode enabled by default
         )
 
 
