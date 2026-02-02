@@ -44,7 +44,7 @@ dev = [
 [[package]]
 name = "amplifier-core"
 version = "1.0.0"
-source = { git = "https://github.com/microsoft/amplifier-core?branch=main#904108b772d8949d48bdf413f7b1b63141fe84f5" }
+source = { git = "https://github.com/microsoft/amplifier-core?branch=main#976fb87335ffe398cf0c1bd1bcd3c2f2c154fc3c" }
 dependencies = [
     { name = "click" },
     { name = "pydantic" },
@@ -56,7 +56,7 @@ dependencies = [
 [[package]]
 name = "amplifier-foundation"
 version = "1.0.0"
-source = { git = "https://github.com/microsoft/amplifier-foundation?branch=main#ca1322b60cc0959fedf01ea5f5668f395c725076" }
+source = { git = "https://github.com/microsoft/amplifier-foundation?branch=main#a2ba8a720cfe0df38dd88a7b877e4c9281314427" }
 dependencies = [
     { name = "amplifier-core" },
     { name = "pyyaml" },
