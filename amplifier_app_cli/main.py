@@ -25,9 +25,11 @@ from amplifier_core.llm_errors import LLMError
 from amplifier_foundation import sanitize_message
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.styles import Style
 from prompt_toolkit.patch_stdout import patch_stdout
 from rich.panel import Panel
 
@@ -124,6 +126,11 @@ def _attach_llm_error_filter() -> None:
 # Load API keys from ~/.amplifier/keys.env on startup
 # This allows keys saved by 'amplifier init' or 'amplifier provider use' to be available
 KeyManager()
+
+# Launch-time "altenter" preference, set from the top-level --altenter flag.
+# Read by interactive_chat() so EVERY interactive entry point (run, resume,
+# continue, default) honors it, regardless of which subcommand launched.
+_launch_altenter = False
 
 
 # Placeholder for the run command; assigned after registration below
@@ -346,6 +353,22 @@ class CommandProcessor:
             "description": "Clear conversation context",
         },
         "/help": {"action": "show_help", "description": "Show available commands"},
+        "/altenter": {
+            "action": "enable_altenter",
+            "description": "Switch to Enter=newline / Alt+Enter=send (restart to undo)",
+        },
+        "/open": {
+            "action": "open_file_browser",
+            "description": "Open the OS file browser in the current directory",
+        },
+        "/code": {
+            "action": "open_vscode",
+            "description": "Open VS Code in the current directory",
+        },
+        "/shell": {
+            "action": "open_shell",
+            "description": "Open the OS terminal in the current directory",
+        },
         "/config": {
             "action": "show_config",
             "description": "Live session config \u2014 /config [category] [disable|enable name]",
@@ -374,6 +397,10 @@ class CommandProcessor:
             "description": "Load a skill (e.g., /skill simplify)",
         },
     }
+
+    # Commands shown under a separate group at the end of /help (in this order).
+    GROUPED_TITLE = "Shortcuts"
+    GROUPED_COMMANDS = ("/altenter", "/open", "/code", "/shell")
 
     # Dynamic shortcuts for modes (populated from mode definitions)
     MODE_SHORTCUTS: dict[str, str] = {}
@@ -578,6 +605,22 @@ class CommandProcessor:
 
         if action == "show_help":
             return self._format_help()
+
+        if action == "enable_altenter":
+            self.session.coordinator.session_state["altenter"] = True
+            return (
+                "✓ altenter enabled: Enter inserts a newline, Alt/Meta+Enter sends. "
+                "Restart Amplifier to return to the default (Enter sends)."
+            )
+
+        if action == "open_file_browser":
+            return self._open_file_browser()
+
+        if action == "open_vscode":
+            return self._open_vscode()
+
+        if action == "open_shell":
+            return self._open_shell()
 
         if action == "show_config":
             return await self._get_config_display(data.get("args", ""))
@@ -1188,10 +1231,89 @@ class CommandProcessor:
         except Exception as e:
             return f"Error forking session: {e}"
 
+    def _open_file_browser(self) -> str:
+        """Open the OS file browser in the current working directory."""
+        import subprocess
+
+        cwd = Path.cwd()
+        try:
+            if sys.platform == "darwin":
+                subprocess.Popen(["open", str(cwd)])
+            elif sys.platform.startswith("win"):
+                os.startfile(str(cwd))  # type: ignore[attr-defined]
+            else:
+                # Linux/BSD and other XDG desktops.
+                subprocess.Popen(["xdg-open", str(cwd)])
+        except FileNotFoundError:
+            return (
+                f"Could not open a file browser: no opener command found. "
+                f"Current directory: {cwd}"
+            )
+        except Exception as e:
+            return f"Could not open file browser: {e}"
+        return f"✓ Opened {cwd} in the file browser"
+
+    def _open_vscode(self) -> str:
+        """Open VS Code in the current working directory via the `code` CLI."""
+        import shutil
+        import subprocess
+
+        cwd = Path.cwd()
+        code = shutil.which("code")
+        if not code:
+            return (
+                "Could not find the 'code' command on PATH. In VS Code, run "
+                "'Shell Command: Install \"code\" command in PATH' from the "
+                "Command Palette, then try /code again."
+            )
+        try:
+            subprocess.Popen([code, str(cwd)])
+        except Exception as e:
+            return f"Could not open VS Code: {e}"
+        return f"✓ Opened {cwd} in VS Code"
+
+    def _open_shell(self) -> str:
+        """Open the default OS terminal in the current working directory."""
+        import shutil
+        import subprocess
+
+        cwd = Path.cwd()
+        try:
+            if sys.platform == "darwin":
+                # Open a new Terminal.app window at the cwd.
+                subprocess.Popen(["open", "-a", "Terminal", str(cwd)])
+            elif sys.platform.startswith("win"):
+                # `start` is a cmd builtin; cwd sets the new shell's directory.
+                subprocess.Popen(["cmd", "/c", "start", "cmd"], cwd=str(cwd))
+            else:
+                # Linux/BSD: try common terminal emulators in order.
+                for term in (
+                    "x-terminal-emulator",
+                    "gnome-terminal",
+                    "konsole",
+                    "xfce4-terminal",
+                    "xterm",
+                ):
+                    if shutil.which(term):
+                        subprocess.Popen([term], cwd=str(cwd))
+                        break
+                else:
+                    return (
+                        "Could not find a terminal emulator on PATH (tried "
+                        "x-terminal-emulator, gnome-terminal, konsole, "
+                        f"xfce4-terminal, xterm). Current directory: {cwd}"
+                    )
+        except Exception as e:
+            return f"Could not open a terminal: {e}"
+        return f"✓ Opened a terminal in {cwd}"
+
     def _format_help(self) -> str:
         """Format help text with commands and dynamic modes section."""
         lines = ["Available Commands:"]
         for cmd, info in self.COMMANDS.items():
+            # Grouped commands are listed separately at the end.
+            if cmd in self.GROUPED_COMMANDS:
+                continue
             lines.append(f"  {cmd:<12} - {info['description']}")
 
         # Add dynamic modes section if modes are available
@@ -1230,6 +1352,18 @@ class CommandProcessor:
                     else str(shortcut_info)
                 )
                 lines.append(f"  /{name:<11} - {description}")
+
+        # Grouped commands section at the very end.
+        group_items = [
+            (cmd, self.COMMANDS[cmd])
+            for cmd in self.GROUPED_COMMANDS
+            if cmd in self.COMMANDS
+        ]
+        if group_items:
+            lines.append("")
+            lines.append(f"{self.GROUPED_TITLE}:")
+            for cmd, info in group_items:
+                lines.append(f"  {cmd:<12} - {info['description']}")
 
         return "\n".join(lines)
 
@@ -2396,9 +2530,19 @@ def get_module_search_paths() -> list[Path]:
     default=None,
     help="Install shell completion for the specified shell (bash, zsh, or fish)",
 )
+@click.option(
+    "--altenter",
+    is_flag=True,
+    default=False,
+    help="Use Enter=newline, Alt/Meta+Enter=send (default is Enter=send)",
+)
 @click.pass_context
-def cli(ctx, install_completion):
+def cli(ctx, install_completion, altenter):
     """Amplifier - AI-powered modular development platform."""
+    # Record the launch-time altenter preference so every interactive entry
+    # point (default, run, resume, continue) honors `amp --altenter ...`.
+    global _launch_altenter
+    _launch_altenter = altenter
     # Handle --install-completion flag
     if install_completion:
         # Auto-detect shell (always, no argument needed)
@@ -2505,7 +2649,11 @@ async def _process_runtime_mentions(session: AmplifierSession, prompt: str) -> s
     )
 
 
-def _create_prompt_session(get_active_mode: Callable | None = None) -> PromptSession:
+def _create_prompt_session(
+    get_active_mode: Callable | None = None,
+    get_model: Callable | None = None,
+    get_altenter: Callable | None = None,
+) -> PromptSession:
     """Create configured PromptSession for REPL.
 
     Provides:
@@ -2513,7 +2661,9 @@ def _create_prompt_session(get_active_mode: Callable | None = None) -> PromptSes
     - Dynamic prompt that shows [mode] indicator when a mode is active
     - Green prompt styling matching Rich console
     - History search with Ctrl-R
-    - Multi-line input with Ctrl-J
+    - Multi-line input. Send/newline scheme depends on get_altenter():
+        default:     Enter=send,    Ctrl-J / Alt+Enter=newline
+        altenter ON: Enter=newline, Alt/Meta+Enter=send (Ctrl-J=newline)
     - Graceful fallback to in-memory history on errors
 
     Args:
@@ -2551,33 +2701,202 @@ def _create_prompt_session(get_active_mode: Callable | None = None) -> PromptSes
     # Create key bindings for multi-line support
     kb = KeyBindings()
 
-    @kb.add("c-j")  # Ctrl-J inserts newline (terminal-reliable)
-    def insert_newline(event):
-        """Insert newline character for multi-line input."""
+    def _altenter() -> bool:
+        """True when the 'altenter' send/newline scheme is active."""
+        return bool(get_altenter and get_altenter())
+
+    # Enter/Alt+Enter behavior depends on the active scheme:
+    #   default (altenter OFF): Enter = SEND,    Alt+Enter = newline
+    #   altenter ON:            Enter = newline, Alt+Enter = SEND
+    # Ctrl-J is ALWAYS a newline (reliable in every terminal), so multi-line
+    # input works regardless of scheme.
+    @kb.add("enter")
+    def on_enter(event):
+        """Enter: send (default) or insert newline (altenter)."""
+        if _altenter():
+            event.current_buffer.insert_text("\n")
+        else:
+            event.current_buffer.validate_and_handle()
+
+    # Ctrl-J always inserts a newline (terminal-reliable multi-line key).
+    @kb.add("c-j")
+    def insert_newline_cj(event):
+        """Insert a newline (always)."""
         event.current_buffer.insert_text("\n")
 
-    @kb.add("enter")  # Enter submits (even in multiline mode)
-    def accept_input(event):
-        """Submit input on Enter."""
-        event.current_buffer.validate_and_handle()
+    # Alt+Enter / Meta+Enter: in a terminal both arrive as the ESC-then-Enter
+    # sequence, so one ("escape", "enter") binding covers both. (macOS/iTerm2:
+    # requires Option set to act as Meta / "Esc+".)
+    @kb.add("escape", "enter")
+    def on_alt_enter(event):
+        """Alt/Meta+Enter: insert newline (default) or send (altenter)."""
+        if _altenter():
+            event.current_buffer.validate_and_handle()
+        else:
+            event.current_buffer.insert_text("\n")
 
-    # Dynamic prompt that shows [mode] indicator when a mode is active
+    # prompt_toolkit's default Ctrl-D is delete-char when the buffer has text and
+    # only acts as EOF/exit on an empty line. Make Ctrl-D always exit, regardless
+    # of buffer contents (EOFError is what the REPL loop catches to quit).
+    @kb.add("c-d")
+    def exit_on_ctrl_d(event):
+        """Exit on Ctrl-D even when the input box has text."""
+        event.app.exit(exception=EOFError)
+
+    # Ctrl-C must NOT exit the process. At the prompt it just clears the current
+    # input (abandon what you're typing); it never raises KeyboardInterrupt.
+    # During execution, Ctrl-C is handled separately (cancellation) — see
+    # _execute_with_interrupt. Exit is via Ctrl-D or the `exit`/`quit` commands.
+    @kb.add("c-c")
+    def clear_input_on_ctrl_c(event):
+        """Clear the input line; do not exit."""
+        event.current_buffer.reset()
+
+    # Neutralize surprising / destructive prompt_toolkit defaults that can lose
+    # or mangle typed input in a multi-line conversational REPL:
+    #   Ctrl-O   -> submit-and-load-next-history (instant submit)
+    #   Meta-#   -> comment all lines AND submit
+    #   Ctrl-Z   -> inserts a raw 0x1A byte (does NOT suspend)
+    #   Esc      -> 1s timeout then no-op (kept, but bound so it's a clean no-op)
+    #   Ctrl-U   -> at column 0 silently joins lines
+    #   Ctrl-K   -> at end of line silently joins lines
+    #   Ctrl-T   -> transposes adjacent characters
+    #   Ctrl-Y   -> yanks internal kill-ring (not the system clipboard)
+    #   Ctrl-L   -> clears the screen / scrollback
+    def _noop(event):
+        """Swallow the key — do nothing."""
+        return
+
+    for _key in ("c-o", "c-z", "c-u", "c-k", "c-t", "c-y", "c-l"):
+        kb.add(_key)(_noop)
+    kb.add("escape", "#")(_noop)  # Meta-#
+    kb.add("escape")(_noop)  # bare Esc -> clean no-op
+
+    # prompt_toolkit's default Left/Right clamp to the current line. Override so
+    # Right at end-of-line moves to the start of the next line, and Left at
+    # start-of-line moves to the end of the previous line (normal editor feel).
+    @kb.add("right")
+    def cursor_right(event):
+        buf = event.current_buffer
+        buf.cursor_position = min(len(buf.text), buf.cursor_position + event.arg)
+
+    @kb.add("left")
+    def cursor_left(event):
+        buf = event.current_buffer
+        buf.cursor_position = max(0, buf.cursor_position - event.arg)
+
+    # Up/Down move ONLY the cursor between lines (prompt_toolkit's default
+    # auto_up/auto_down replaces the whole buffer with a history entry once you
+    # hit the first/last line — a multi-line-editing footgun). History stays
+    # available via PageUp/PageDown (below) and Ctrl-R search.
+    @kb.add("up")
+    def cursor_up(event):
+        event.current_buffer.cursor_up(count=event.arg)
+
+    @kb.add("down")
+    def cursor_down(event):
+        event.current_buffer.cursor_down(count=event.arg)
+
+    # PageUp/PageDown navigate command history (replace buffer).
+    @kb.add("pageup")
+    def history_back(event):
+        event.current_buffer.history_backward(count=event.arg)
+
+    @kb.add("pagedown")
+    def history_forward(event):
+        event.current_buffer.history_forward(count=event.arg)
+
+    def _term_columns(default: int = 80) -> int:
+        """Current terminal width (for full-width separator rules)."""
+        try:
+            from prompt_toolkit.application import get_app
+
+            cols = get_app().output.get_size().columns
+            if cols and cols > 0:
+                return cols
+        except Exception:
+            pass
+        import shutil
+
+        return shutil.get_terminal_size((default, 24)).columns
+
+    # Input prompt framed by a magenta rule above the (multi-line) input, with
+    # the active mode nested into that top rule. The matching rule below the
+    # input is rendered by get_toolbar().
     def get_prompt():
-        if get_active_mode:
-            active_mode = get_active_mode()
-            if active_mode:
-                return HTML(
-                    f"\n<ansicyan>[{active_mode}]</ansicyan><ansigreen><b>></b></ansigreen> "
-                )
-        return HTML("\n<ansigreen><b>></b></ansigreen> ")
+        width = _term_columns()
+        mode = (get_active_mode() if get_active_mode else None) or "none"
+        clock = datetime.now().strftime("%H:%M:%S")
+        head = "▰▰ "
+        sep = " ▰▰ "  # separates the white time from the mode label
+        mid = f"mode: {mode} "
+        fill = max(0, width - len(head) - len(clock) - len(sep) - len(mid))
+        # Layout: thick rule · white time · ▰▰ · mode · thick rule to right edge.
+        # Time (white) and mode are LEFT-aligned; nothing is right-aligned, which
+        # avoids ugly reflow of the separator when the terminal is resized.
+        # The time (HH:MM:SS) marks ~when the previous output finished (frozen
+        # until you type). End on a newline so input starts at column 0.
+        return HTML(
+            f"\n<ansimagenta><b>{head}</b></ansimagenta>"
+            f"<ansiwhite><b>{clock}</b></ansiwhite>"
+            f"<ansimagenta><b>{sep}</b></ansimagenta>"
+            f"<ansicyan><b>{mid}</b></ansicyan>"
+            f"<ansimagenta><b>{'▰' * fill}</b></ansimagenta>\n"
+        )
+
+    def _format_cwd(max_len: int = 40) -> str:
+        """Compact, home-relative cwd for the status bar."""
+        try:
+            cwd = Path.cwd()
+        except OSError:
+            return "?"
+        try:
+            rel = cwd.relative_to(Path.home())
+            text = "~" if str(rel) == "." else f"~/{rel}"
+        except ValueError:
+            text = str(cwd)
+        if len(text) > max_len:
+            text = "…" + text[-(max_len - 1) :]
+        return text
+
+    # Sticky bottom status bar: a magenta rule (the input box's lower border)
+    # on its own line, then a label-free, no-background status line in dim text.
+    # mode lives in the top rule (get_prompt), so it's omitted here.
+    # Rendered in the normal screen buffer, so native scrollback is preserved
+    # and the bar scrolls away with history when you scroll up.
+    def get_toolbar() -> FormattedText:
+        rule = "─" * _term_columns()
+        model = (get_model() if get_model else None) or "none"
+        cwd = _format_cwd()
+        # Send/newline hint reflects the active scheme.
+        if _altenter():
+            send_hint = "Alt+Enter send · Enter newline"
+        else:
+            send_hint = "Enter send · Ctrl-J newline"
+        keys = f"{send_hint} · PgUp/Dn history · ^R search · ^C stop · ^D exit"
+        sep = "  |  "
+        return FormattedText(
+            [
+                ("fg:ansimagenta", f"{rule}\n"),
+                ("fg:#888888", f" {model}"),
+                ("fg:#555555", sep),
+                ("fg:#888888", f"{cwd}"),
+                ("fg:#555555", sep),
+                ("fg:#777777", f"{keys} "),
+            ]
+        )
 
     return PromptSession(
         message=get_prompt,  # Callable for dynamic prompt
         history=history,
         key_bindings=kb,
         multiline=True,  # Enable multi-line display
-        prompt_continuation="  ",  # Two spaces for alignment (cleaner than "... ")
+        prompt_continuation="",  # No indent: continuation lines start at column 0
         enable_history_search=True,  # Enables Ctrl-R
+        bottom_toolbar=get_toolbar,  # Sticky status bar
+        # Drop the default reverse-video background on the toolbar so the
+        # status line is plain dim text on the normal terminal background.
+        style=Style.from_dict({"bottom-toolbar": "noreverse"}),
     )
 
 
@@ -2590,6 +2909,7 @@ async def interactive_chat(
     prepared_bundle: "PreparedBundle | None" = None,
     initial_prompt: str | None = None,
     initial_transcript: list[dict] | None = None,
+    altenter: bool = False,
 ):
     """Run an interactive chat session.
 
@@ -2633,6 +2953,14 @@ async def interactive_chat(
     if initialized.configurator is not None:
         command_processor.configurator = initialized.configurator
 
+    # Seed the altenter scheme from the launch flag. `altenter` is the per-call
+    # arg (e.g. `amp run --altenter`); _launch_altenter is the top-level
+    # `amp --altenter ...` flag, honored for every entry point (run, resume,
+    # continue, default). Runtime /altenter can enable it later, but not disable
+    # it — that needs a restart.
+    if altenter or _launch_altenter:
+        session.coordinator.session_state["altenter"] = True
+
     # Create session store for saving
     store = SessionStore()
 
@@ -2650,16 +2978,22 @@ async def interactive_chat(
                 f"[dim]Session ID: [/dim][dim bright_yellow]{actual_session_id}[/dim bright_yellow]\n"
                 f"[dim]amplifier {get_version()} | core {get_core_version()}[/dim]\n"
                 f"[dim]{config_summary.format_banner_line()}[/dim]\n"
-                f"Commands: /help | Multi-line: Ctrl-J | Exit: Ctrl-D",
+                f"Commands: /help | Send: Enter | Newline: Ctrl-J | Exit: Ctrl-D",
                 border_style="cyan",
             )
         )
 
-    # Create prompt session for history and advanced editing
+    # Create prompt session for history and advanced editing.
+    # get_model uses a lambda so it resolves _extract_model_name (defined just
+    # below) lazily at render time.
     prompt_session = _create_prompt_session(
         get_active_mode=lambda: command_processor.session.coordinator.session_state.get(
             "active_mode"
-        )
+        ),
+        get_model=lambda: _extract_model_name(),
+        get_altenter=lambda: command_processor.session.coordinator.session_state.get(
+            "altenter", False
+        ),
     )
 
     # Helper to extract model name from config
@@ -2953,12 +3287,12 @@ async def interactive_chat(
                 break
 
             except KeyboardInterrupt:
-                # Ctrl-C at prompt - confirm exit to prevent accidental exits when spamming Ctrl-C
+                # Ctrl-C must never exit the process. At the prompt it's bound to
+                # clear the input (see clear_input_on_ctrl_c); this except is a
+                # safety net for any KeyboardInterrupt that still slips through —
+                # swallow it and stay in the REPL. Exit is via Ctrl-D / exit/quit.
                 console.print()  # New line for cleaner output
-                if click.confirm("Exit Amplifier?", default=False):
-                    console.print("[dim]Exiting...[/dim]")
-                    break
-                # Otherwise continue in the REPL
+                continue
 
             except ModuleValidationError as e:
                 if not display_validation_error(console, e, verbose=verbose):

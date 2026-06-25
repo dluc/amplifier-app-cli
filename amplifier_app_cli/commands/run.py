@@ -57,6 +57,12 @@ def register_run_command(
     @click.option("--resume", help="Resume specific session with new prompt")
     @click.option("--verbose", "-v", is_flag=True, help="Verbose output")
     @click.option(
+        "--altenter",
+        is_flag=True,
+        default=False,
+        help="Use Enter=newline, Alt/Meta+Enter=send (default is Enter=send)",
+    )
+    @click.option(
         "--output-format",
         type=click.Choice(["text", "json", "json-trace"]),
         default="text",
@@ -72,6 +78,7 @@ def register_run_command(
         resume: str | None,
         verbose: bool,
         output_format: str,
+        altenter: bool,
     ):
         """Execute a prompt or start an interactive session."""
         from ..session_store import SessionStore
@@ -358,6 +365,7 @@ def register_run_command(
                         prepared_bundle=prepared_bundle,
                         initial_prompt=initial_prompt,
                         initial_transcript=transcript,
+                        altenter=altenter,
                     )
                 )
             else:
@@ -372,6 +380,7 @@ def register_run_command(
                         bundle_name=config_source_name,
                         prepared_bundle=prepared_bundle,
                         initial_prompt=initial_prompt,
+                        altenter=altenter,
                     )
                 )
         else:
